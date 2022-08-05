@@ -1,0 +1,1800 @@
+// Michael Burke - Art of TradeStation - 2020
+
+#region - Documentation - 
+{
+---------------------------------------------------------------------------------------------------
+IDENTIFICATION
+==============
+Name:      #Futures Info
+Type:      Indicator
+TS Version:    9.5 Build 26 or later
+  
+---------------------------------------------------------------------------------------------------
+DOCUMENTATION
+=============
+This module displays information about the futures symbol in data1 of the associated chart.
+--------------------------------------------------------------------------------------------------- 
+}
+#endregion
+
+#region - History -
+{
+---------------------------------------------------------------------------------------------------
+HISTORY
+=======
+Date    Version    Task
+---------  --------  -------------------------------------------------------------------
+10/30/18  08.00.00  * Developed and updated
+02/09/19  09.00.00  * Expand documentation
+            * Include #region functionality 
+            * Method organization
+            * Inserted Composite Formatting  
+            * Added CurChar to XML
+            * Added CurChar for CHF
+      09.01.00  * Add Bitcoin futures support
+            * Use composite formatting on Futures Chain Form
+02/14/19  09.02.00  * Version label on Futures Chain form
+      09.02.01  * Remove TempQP vector
+02/28/19  09.02.02  * Add Global Dictionary Utility
+02/28/19  09.02.03  * Add Micros
+10/23/19  09.03.00  * Address datetime issues for non-US regions
+            * Display dates in local regional format
+            * Display session times in local regional format
+            * Correct symbol currency character display
+12/10/19  09.04.00  * New 12/10/19 web site structure
+            * Added LogStep option 
+      09.05.00  * Add check for empty XML document from WorkArea
+12/11/19  09.06.00  * Add iMaxDaysOld check
+            * Updtd format back to include HH:mm:ss
+---------------------------------------------------------------------------------------------------
+TO DO LIST
+==========
+Date    Version    Task
+---------  --------  -------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+}
+#endregion
+
+#region - Usings -
+using elsystem;
+using elsystem.collections;
+using elsystem.drawing;
+using elsystem.io;
+using elsystem.xml;
+using elsystem.windows.forms; 
+using tsdata.common;
+using tsdata.marketdata;
+#endregion
+
+#region - Inputs_Study -
+Inputs: 
+  int ContractMultiplierDefault(1), 
+  bool LoadGD(true),
+  int iMaxDaysOld(0),      //  Maximum number of days old the XML file may be before it must be re-extracted
+                //  0 ==> Only today; 1 ==> Yesterday or today
+  bool iLogSteps(False);
+#endregion
+
+#region - Constants_Study -
+constants:
+  string AppVersion("09.06.00"),
+  string MDYHMSFormat("%m/%d/%y %H:%M:%S"),
+  string Currencies( "AUD,CAD,CHF,CNH,CZK,DKK,EUR,GBP,HKD,HUF,JPY,MNX,NAD,NOK,PLN,SGD,TRY,USD,XAG,XBR,XTI,ZAR" ),
+  string XmlDocName( "FuturesMarginTA.xml" ),
+  string WEBAWS("WEB"),      
+  string UpperCaseAndDigits("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+  string TSWebSiteURL("https://www.tradestation.com/pricing/futures-margin-requirements/"),
+  string AWSWebSiteURL("https://s3.us-east-2.amazonaws.com/tradestationmargin/FuturesMarginTA.xml"),
+  string USDCurrency("$"),
+  string EURCurrency("€"),
+  string GBPCurrency("£"), 
+  string CHFCurrency("₣");
+  
+constants:
+  tr("tr");
+#endregion
+#region - Variables_Study -
+variables:
+  Version TSVersion(null),
+
+  intrabarpersist int YY(0), 
+  intrabarpersist int MM(0),  
+  intrabarpersist bool LastBar(false),    
+  intrabarpersist bool WebDocComplete( false ), 
+  intrabarpersist string fSymbol( "" ),
+  intrabarpersist bool SymbolOK( false ),
+  Vector BSymbols(Null),
+  Vector BLTD(Null),
+  Vector BFND(Null),
+  Vector QPS(Null),
+  
+  intrabarpersist BarValue(0),
+  
+  intrabarpersist string ThisSymbolRoot(""),  
+  intrabarpersist int ContCalc(1),
+  
+  intrabarpersist string FrontSym( "" ),
+  intrabarpersist string CurrentSym( "" ),
+  intrabarpersist string NextSym( "" ),
+  
+  intrabarpersist string FrontSymLTD( "" ),
+  intrabarpersist string CurrentSymLTD( "" ),
+  intrabarpersist string NextSymLTD( "" ),
+  
+  intrabarpersist string FrontSymFND( "" ),
+  intrabarpersist string CurrentSymFND( "" ),
+  intrabarpersist string NextSymFND( "" ),
+  
+  Timer tmrOneSecond( NULL ),
+  XmlDocument XD( NULL ),          { XmlDocument to hold information }
+  XmlNode XNSymbolRoots( NULL ),
+  XmlElement XE( NULL ),
+  
+  Form frmBrowser( NULL ),
+  WebBrowser Browser( NULL ),       { browser to navigate to margin page }
+  
+  GlobalDictionary MR( NULL),
+  
+  intrabarpersist int  SymbolType(0), 
+  intrabarpersist int TestCount( 0 ),
+  intrabarpersist string oSymbolDesc(""),
+  intrabarpersist string oSymbolExch(""),
+  intrabarpersist string oSymbolCurrency(""),
+  intrabarpersist string oSymbolCurrencyChar("$"),
+  intrabarpersist double oInitialMargin(0),
+  intrabarpersist double oMaintenanceMargin(0),
+  intrabarpersist double oDayRatePercent(0),
+  intrabarpersist string oUpdated(""),
+  
+  TokenList CurrencyListTL( NULL ),
+  tokenlist FMonths(NULL),
+  intrabarpersist int DecimalPlacesX(0),
+  SymbolPriceScale(0),
+  
+  //-------------------------------------------------------------------------------------
+  //  strings that should be in the web page - are constants but syntax of EL does not support it
+  //-------------------------------------------------------------------------------------
+  {
+  intrabarpersist string StartTag( "<TABLE class=" + DoubleQuote + "table full" + DoubleQuote + ">" ), // start tag of margin table
+  intrabarpersist string endTag( "</TABLE>" ), // end tag of margin table
+
+  intrabarpersist string StartTagl( "<table class=" + DoubleQuote + "table full" + DoubleQuote + ">" ), // start tag of margin table
+  intrabarpersist string endTagl( "</table>" ); // end tag of margin table
+  }
+    String StartTagLC("<tbody>"),
+    String EndTagLC("</tbody>");
+
+#endregion
+
+#region - Initialization -
+method void AnalysisTechnique_Initialized( elsystem.Object sender, elsystem.InitializedEventArgs args ) 
+begin
+//  if iLogSteps then ClearPrintLog();
+//  if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} Futures Margin TA Init", DateTime.Now));
+
+  MR = GlobalDictionary.Create(TRUE, "GD_Margin");
+
+  fSymbol = Symbol;
+  
+  SymbolOK = CheckSymbol( fSymbol ); 
+  
+  NumDecimalsX();
+  
+  SymbolType = SecurityType.Future;
+  
+  tmrOneSecond = Timer.Create();
+
+  If SymbolOK AND SymbolType = Category then 
+  begin
+  
+    FMonths = new tokenlist;
+    
+    YY = strtonum(DateTime.Today.Format("%y")) astype int;
+    MM = DateTime.Today.Month astype int;
+    
+    BSymbols = New Vector;
+    BLTD = New Vector;
+    BFND = New Vector;
+    QPS = New Vector;
+  
+    ThisSymbolRoot = SymbolRoot; 
+    
+    //-------------------------------------------------------------------------------------
+    //  Create XMLDocument for holding futures information
+    //-------------------------------------------------------------------------------------
+    CreateXmlDoc(); 
+    
+    //-------------------------------------------------------------------------------------
+    //  Initialize Form Controls
+    //-------------------------------------------------------------------------------------
+    FormInit();
+//    if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} Form Initialized", DateTime.Now));
+    
+    //-------------------------------------------------------------------------------------
+    //  Put symbol related values into form
+    //-------------------------------------------------------------------------------------
+    SetMonthCodes();
+    SetSessions();
+    SetPointValues();
+  
+    If FMonths.Count > 0 AND FMonths[0] astype string <> "invalidRoot" then  BuildQPS(); 
+    
+    CurrencyListTL = new Tokenlist;
+    CurrencyListTL.Add(Currencies); 
+    
+    //-------------------------------------------------------------------------------------
+    //  Create OneSecond timer
+    //-------------------------------------------------------------------------------------
+    CreateTimer();
+//    if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} Timer Started", DateTime.Now));
+  
+    //-------------------------------------------------------------------------------------
+    //  Get Margin Information from Web Page - defer until last bar
+    //-------------------------------------------------------------------------------------
+    //GetMarginFromWeb();
+//    if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} Init Complete", DateTime.Now));
+  end;  
+end;
+#endregion
+
+#region - Get Number of Decimal Places -
+method void NumDecimalsX()
+Begin
+  SymbolPriceScale = PriceScale;
+  if SymbolPriceScale > 0 then
+  begin
+    DecimalPlacesX = NumDecimals(SymbolPriceScale);
+  end ;
+End;
+#endregion
+
+#region - Form Methods -
+method void FormInit()
+begin
+  //-------------------------------------------------------------------------------------
+  //  Set Anchor Properties
+  //-------------------------------------------------------------------------------------
+  LblBasics.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  
+  BPointValue.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  MinMvD.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  MinMv.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  BarVal.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  Session.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  Exchange.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  MonthCodes.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  
+  InitalM.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  MaintM.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  DayTrdM.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  Update.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  
+  ChartFN.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  ChartLD.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  FrontFND.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  FrontLTD.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  CurrentFND.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  CurrentLTD.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  NextFND.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  NextLTD.Anchor = AnchorStyles.Left + AnchorStyles.Top + AnchorStyles.Right;
+  
+  TSVersion = elsystem.Environment.GetPlatformVersion();
+  LblVersion.Text = string.format("TS {0}.{1}.{2}  App {3}", 
+    TSVersion.Major, TSVersion.Minor, TSVersion.Revision, AppVersion);
+  LblVersionFC.Text = LblVersion.Text;
+      
+  ConCalc.Value = ContractMultiplierDefault;
+
+  LblBasics.Text = LblBasics.Text + " - " + LeftStr(Description, InStr(Description, " "));
+  
+  Sym2.Text = "n/a";
+  Sym3.Text = "n/a"; 
+  Sym4.Text = "n/a";
+  
+  Last2.Text = "-";
+  Last3.Text = "-";
+  Last4.Text = "-";
+  
+  PctCh2.Text = "-";
+  PctCh3.Text = "-";
+  PctCh4.Text = "-";
+end;
+
+//-------------------------------------------------------------------------------------
+//  Contract multiplier value changed
+//-------------------------------------------------------------------------------------
+Method void ShowForm()
+Begin
+  Form.Show();
+  FormVol.Show();
+end;
+
+//-------------------------------------------------------------------------------------
+//  Set Point Values
+//-------------------------------------------------------------------------------------
+Method void SetPointValues()
+variables: 
+  string Tempstr; 
+Begin
+  BPointValue.Text = string.Format("PointValue: {0:C0}", BigPointValue * ConCalc.Value).Replace("$", oSymbolCurrencyChar); 
+  
+  //MinMvD.Text = "MinMove $: " + NumtoStr((MinMove/PriceScale)*BigpointValue * ConCalc.Value,NumDecimals( PriceScale ));
+  MinMvD.Text = string.Format("MinMove: {0:C#}".Replace("#", NumtoStr(DecimalPlacesX,0)), 
+    (MinMove/PriceScale)*BigpointValue * ConCalc.Value).Replace("$", oSymbolCurrencyChar); ;
+  
+  TempStr = "MinMove Pts: {0:N#}".Replace("#", NumtoStr(DecimalPlacesX, 0));
+  //MinMv.Text = "MinMove: " + NumtoStr(MinMove/PriceScale,NumDecimals( PriceScale ));
+  MinMv.Text = string.Format(TempStr, MinMove/PriceScale);
+  
+  Exchange.Text = "Exchange: " + Exchlisted;
+end;
+
+//-------------------------------------------------------------------------------------
+//  Update Margin information in form
+//-------------------------------------------------------------------------------------
+method void SetMargin()
+vars: double DayM;
+begin
+  InitalM.Text = string.Format("Initial: {0:C0}", + oInitialMargin * ConCalc.Value).Replace("$", oSymbolCurrencyChar); 
+  MaintM.Text = string.Format("Maint: {0:C0}",oMaintenanceMargin* ConCalc.Value).Replace("$", oSymbolCurrencyChar);
+  DayM = oDayRatePercent;
+  if oDayRatePercent = 13 then DayM = 12.5;
+  DayTrdM.Text = string.Format("DayTrd: {0:P1} / {1}{2:N0}", 
+    DayM *.01, oSymbolCurrencyChar, DayM *.01 * oInitialMargin * ConCalc.Value);
+  Update.Text = "LastUpdate: " + oUpdated;
+end;
+
+method void ConCalc_ValueChanged( elsystem.Object sender, elsystem.EventArgs args ) 
+begin
+  ContCalc = ConCalc.Value astype int;
+  SetPointValues();
+  SetMargin();
+end;
+
+#endregion
+
+#region - Check String Character Set -
+//-------------------------------------------------------------------------------------
+//  Returns 0 if all characters in toCheck are in the validChars string
+//-------------------------------------------------------------------------------------
+method int InvalidCharIndex( string toCheck, string validChars )
+Variables:
+  Int Index,
+  int InvalidIndex;
+begin
+  InvalidIndex = 0;
+  for Index = 1 to strlen( toCheck )
+  begin
+    if instr( validChars, midstr( tocheck, Index, 1 ) ) = 0 then
+    begin
+      InvalidIndex = Index;
+      break;
+    end;   
+  end;
+  return InvalidIndex;
+end;
+#endregion
+
+#region - Validate Symbol -
+//-------------------------------------------------------------------------------------
+//  Check for valid symbol using TSOpt  
+//-------------------------------------------------------------------------------------
+method bool CheckSymbol( string MySymbol ) 
+variables: 
+  bool IsValid , 
+  tsopt.job job, 
+  tsopt.security security; 
+begin 
+  job = new tsopt.job; 
+  security = job.securities.addSecurity(); 
+  security.symbol = MySymbol; 
+  IsValid = job.securities.ValidateSymbols( false ); 
+  return IsValid; 
+end;
+#endregion
+
+#region - Get Margin Information from Web Site Page -
+method void GetMarginFromWeb()
+Vars: 
+  bool ifneeded;
+begin
+//  if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} GetMarginFromWeb Called", DateTime.Now));
+  
+  //-------------------------------------------------------------------------------------
+  //  Create a form to be used for the browser and locate if one display to the left
+  //  and down
+  //-------------------------------------------------------------------------------------
+  frmBrowser = Form.Create( " ", 0, 0 );
+  frmBrowser.Location( -1024, -1024 );
+  
+  //-------------------------------------------------------------------------------------
+  //  create the browser control 
+  //-------------------------------------------------------------------------------------
+  Browser = WebBrowser.Create( 0, 0 );
+  Browser.ScriptErrorsSuppressed = true;
+  Browser.Visible = true;
+  frmBrowser.AddControl( Browser );
+  
+  //-------------------------------------------------------------------------------------
+  //  First try to load XML Document and then if not available will go to web or aws
+  //-------------------------------------------------------------------------------------
+  ifneeded = FALSE;
+  if not LoadXmlDoc() then
+  begin
+    ifNeeded = true;
+  end
+  else
+  begin
+    GetMarginXML();
+  end;
+  
+//    if iLogSteps then 
+//    Print(string.Format("{0:MM/dd/yy HH:mm:ss} GetMarginFromWeb - Needed={1} Src={2}", 
+//      DateTime.Now, IfNeeded, WEBAWS));
+  
+  if ifNeeded then
+  begin
+    switch WEBAWS.ToUpper().Trim()
+    begin
+      case "WEB":
+        GetWeb();
+      case "AWS":    
+        GetAWS();
+        break;
+      default:
+        GetWeb();
+    end;
+  end;
+end;
+
+//-------------------------------------------------------------------------------------
+//  Initiate loading web page
+//-------------------------------------------------------------------------------------
+method void GetWeb()
+begin
+  frmBrowser.Show();
+  Browser.DocumentCompleted += OnDocumentCompletedWEB;
+  Browser.Navigate(TSWebSiteURL);
+end;
+
+//-------------------------------------------------------------------------------------
+//  Initiate loading XmlDocument from AWS
+//-------------------------------------------------------------------------------------
+method void GetAWS()
+begin
+  frmBrowser.Show();
+  Browser.DocumentCompleted += OnDocumentCompletedAWS;
+  Browser.Navigate(AWSWebSiteURL);
+end;
+
+//-------------------------------------------------------------------------------------
+//  method called when the document finishes loading from Web Site Page 
+//-------------------------------------------------------------------------------------
+method void OnDocumentCompletedWEB( elsystem.Object sender, WebBrowserDocumentCompletedEventArgs args )
+variables:  
+  XmlDocument doc, 
+  XmlNodeList rows, 
+  XmlNodeList cols, 
+  int cnt, 
+  string rawmargindata, 
+  string xmlmargindata, 
+  string singlechar, 
+  int row,
+  int StartIndex,
+  int EndIndex;
+begin
+  //-------------------------------------------------------------------------------------
+  //  check if on a prior completed event everything needed was found
+  //-------------------------------------------------------------------------------------
+    if iLogSteps then 
+	    Print(string.Format("{0:MM/dd/yy HH:mm:ss} DocComplete-Web Complete={1}", DateTime.Now, WebDocComplete));
+
+
+  if WebDocComplete then return;
+  
+   try  
+    //-------------------------------------------------------------------------------------
+    //  Search for starting string of table with both uppercase and lowercase - if neither
+    //  found continue waiting for next completed event as it seems that sometimes the 
+    //  required information is not returned by the first completed event
+    //-------------------------------------------------------------------------------------
+    StartIndex = Browser.DocumentText.IndexOf(StartTagLC); //, 0, Browser.DocumentText.Length, StringComparison.CurrentCultureIgnoreCase); // documenttext contains the entire html page
+    
+    //-------------------------------------------------------------------------------------
+    //  Extract table information and perform some basic cleanup on the HTML text to make
+    //  it XML loadable
+    //-------------------------------------------------------------------------------------
+    rawmargindata = Browser.DocumentText.Substring(StartIndex); 
+    
+    EndIndex = rawmargindata.IndexOf( endTagLC ); // find the end of the margin table - now using first endtag
+    if iLogSteps then 
+      Print(string.Format("{0:MM/dd/yy HH:mm:ss} DocCompleted SX={1} EX={2}", DateTime.Now, StartIndex, EndIndex));
+    
+    //-------------------------------------------------------------------------------------
+    //  The following statement works with the new website as of 12/10/19
+    //-------------------------------------------------------------------------------------
+    rawmargindata = rawmargindata.Substring(0 , EndIndex + EndTagLC.Length ); // and strip everything after it.
+
+    //-------------------------------------------------------------------------------------
+    //  the rawmargindata string is almost xml, but we need to get rid of ampersands
+     //
+     //  NOTE: This is a bit flawed as we have the following in the code
+     //  &amp;
+     //  &euro
+     //  &pound;
+    //-------------------------------------------------------------------------------------
+     xmlmargindata = rawmargindata.Replace("&", "" );
+
+     //-------------------------------------------------------------------------------------
+    //  Load table into XMlDocument and then extract margin information from it
+    //-------------------------------------------------------------------------------------
+    doc = New XmlDocument();     // instantiate an xml document
+    doc.LoadXml( xmlmargindata );   // load in the xml string
+//    print(xmlmargindata);
+    CreateXmlDoc();
+    GetMargin( doc );
+    WriteXmlDoc();          //  Maybe premature
+    GetMarginXML();
+    
+     //-------------------------------------------------------------------------------------
+    //  All done getting margin information
+    //-------------------------------------------------------------------------------------
+    WebDocComplete = true;
+    
+  catch (Exception ex)
+    Print("OnDocumentCompleted Error: ", ex.Message );
+    if ex.InnerException <> NULL then Print( ex.InnerException.Message );
+  end;
+  
+  //-------------------------------------------------------------------------------------
+  //  All done - can get rid of browser form
+  //-------------------------------------------------------------------------------------
+  frmBrowser = NULL;
+  Browser = NULL;
+end;
+
+//-------------------------------------------------------------------------------------
+//  method called when the Xmldocument finishes loading from AWS
+//-------------------------------------------------------------------------------------
+method void OnDocumentCompletedAWS( elsystem.Object sender, WebBrowserDocumentCompletedEventArgs args )  
+variables:  
+  string xmlmargindata;
+begin
+  xmlmargindata = Browser.Documenttext.ToString();
+   try
+    XD.LoadXml(xmlmargindata);  
+    WriteXmlDoc();
+    GetMarginXML();
+  catch (Exception ex)
+    //Print("OnDocumentCompleted Error: ", ex.Message );
+    //if ex.InnerException <> NULL then Print( ex.InnerException.Message );
+  end;
+  frmBrowser = NULL;
+  Browser = NULL;
+end;
+
+//-------------------------------------------------------------------------------------
+//  Extract margin information from scraped text from web page
+//-------------------------------------------------------------------------------------
+method void GetMargin( XmlDocument doc )
+variables:  
+  XmlNodeList rows, 
+  XmlNodeList cols, 
+  int RowIndex,
+  string SymDesc,
+  string SymRoot,
+  double InitMargin,
+  double MaintenanceMargin,
+  double DayRatePercent,
+  string SymExchange,
+  string SymCurrency,
+  string SymCurrencyChar,
+  string SymCategory,
+  string Work,
+  string SectionExchange,
+  Vector WorkSplit,
+  string WorkPart,
+  double IMPercent,
+  double MMPercent;
+begin
+  try
+    //-------------------------------------------------------------------------------------
+    // Now xmlmargindata can contains the margin table and is more or less xml, 
+    // let's load it into an xmldocument and parse the data
+    //-------------------------------------------------------------------------------------
+    rows = doc.GetElementsByTagName( tr );
+     
+    if iLogSteps then 
+      Print(string.Format("{0:MM/dd/yy HH:mm:ss} Extracting {1} Rows", DateTime.Now, rows.Count));
+  
+    SymCategory = "";
+    for RowIndex = 1 to rows.Count - 1  
+    begin
+      cols = rows.Item( RowIndex ).ChildNodes; 
+      
+      
+      //-------------------------------------------------------------------------------------
+      // process header 
+      //-------------------------------------------------------------------------------------
+      if cols <> NULL and Cols.Count  > 00 and cols.Count <  05 then
+      begin
+        Work = cols.Item( 0 ).InnerText.ToUpper();
+        SymCategory = cols.Item( 0 ).InnerText;
+        SectionExchange = GetExchange(Work);
+        if iLogSteps then 
+          Print(string.Format("{0:MM/dd/yy HH:mm:ss} Category {1} Rows", DateTime.Now, SymCategory));        
+        Continue;      
+      end;
+       
+      //-------------------------------------------------------------------------------------
+      // Ignore rows with other than 5 columns as they are just headers 
+      //-------------------------------------------------------------------------------------
+      if cols <> NULL and Cols.Count  > 00 and cols.Count  = 07 then 
+      begin
+        SymDesc = cols.Item( 0 ).InnerText.Replace( "*", "" );
+        SymDesc = SymDesc.Replace( "amp;", "&" );
+        
+        //print(SymDesc);
+        
+        //-------------------------------------------------------------------------------------
+        //  Get Symbol Root 
+        //-------------------------------------------------------------------------------------
+        SymRoot = cols.Item( 1 ).InnerText;
+        SymRoot = OnlyUCAndDigits(SymRoot); //  Remove any non-Uppercase nor non-digit characters
+//        print(SymRoot);
+       
+       
+        //-------------------------------------------------------------------------------------
+        //  Get initial margin 
+        //
+        //  NOTE: If it starts with nn% then it is a Bitcoin future 
+        //-------------------------------------------------------------------------------------
+        Work = cols.Item( 2 ).InnerText;
+        if cols.Item( 2 ).InnerText.Contains("%") 
+          and double.TryParse(cols.Item( 2 ).InnerText.Substring(0, cols.Item( 2 ).InnerText.IndexOf("%")), IMPercent) 
+          and cols.Item( 3 ).InnerText.Contains("%")
+          and double.TryParse(cols.Item( 3 ).InnerText.Substring(0, cols.Item( 3 ).InnerText.IndexOf("%")), MMPercent) then
+        begin
+          //-------------------------------------------------------------------------------------
+          //  Bitcoin - Extract percent and multiple by open price
+          //-------------------------------------------------------------------------------------
+          SymCurrency ="USD";
+          SymCurrencyChar = USDCurrency;
+          InitMargin = GetBitcoinPercent(Work) * Open * 0.01;
+        end
+        
+        else
+        begin
+//        	print("Outside BTC Loop");
+          //-------------------------------------------------------------------------------------
+          //  Non-dynamic margin
+          //-------------------------------------------------------------------------------------
+          //  Get initial margin 
+          //-------------------------------------------------------------------------------------
+          SymCurrency = GetSymCurrency( Work );
+          SymCurrencyChar = GetSymCurrencyChar( Work );
+          Work = GetValueWOCurrency( Work );
+          Work = Parsestringx( Work );
+          InitMargin = strtonum( Work );
+//          print("InitMargin");
+//          print(InitMargin);
+        
+          //-------------------------------------------------------------------------------------
+          //  Get maintenance margin 
+          //-------------------------------------------------------------------------------------
+          Work = cols.Item( 3 ).InnerText;
+          Work = GetValueWOCurrency( Work );
+          Work = Parsestring( Work );
+           MaintenanceMargin = strtonum( Work );
+//           print("MaintenanceMargin");
+//           print(MaintenanceMargin);
+         
+          //-------------------------------------------------------------------------------------
+           //  Get day Rate 
+          //-------------------------------------------------------------------------------------
+           
+           Work = cols.Item( 6 ).InnerText.Trim();
+           
+//           Print("DAYRATE: ", SymRoot, " ", Work);
+           if Work.ToUpper() = "NONE" then 
+           begin
+             DayRatePercent = 100;
+             IMPercent = DayRatePercent;
+             MMPercent = DayRatePercent;
+             //Print(SymRoot, " ", "NONE Choosen");
+           end
+           else if Work.ToUpper().EndsWith("OF INITIAL")  then
+           begin
+             WorkSplit = Work.ToUpper().Split(" ");
+             WorkPart = WorkSplit[0] astype string;
+              WorkPart = WorkPart.Trim();
+              if WorkPart.EndsWith("%") then WorkPart = Workpart.Substring(0, WorkPart.Length - 1);
+              DayRatePercent = 100;
+              if not double.TryParse(WorkPart, DayRatePercent) then 
+             begin
+               Print("Unrecognized Day Rate % value: ", Work);
+             end;
+             IMPercent = DayRatePercent;
+             MMPercent = DayRatePercent;
+           end
+           else if Work.EndsWith("%") then 
+           begin
+           		//Print("Percent Substring");
+				WorkPart = Work.Substring(0, Work.Length - 1);
+           		if double.TryParse(WorkPart, DayRatePercent) then
+           		Begin
+           	 		//Print("DayRateDoubleParse");
+             		DayRatePercent = double.parse(WorkPart);
+             		//Print(SymRoot, " ", DayRatePercent, " ", WorkPart);
+           		end;
+           	end
+           else 
+           begin
+           	//print("in garbage");
+           	//print (cols.Item(6).InnerText.Trim());
+             DayRatePercent = 100;
+             IMPercent = DayRatePercent;
+             MMPercent = DayRatePercent;
+           end;
+         end;
+           
+           //Print("ended");
+        //-------------------------------------------------------------------------------------
+         //  Exchange 
+        //-------------------------------------------------------------------------------------
+        SymExchange = GetExchange( SymDesc );
+        if SymExchange = "" then 
+        begin
+          SymExchange = SectionExchange;
+        end;
+         
+        //-------------------------------------------------------------------------------------
+         //  Remove Exchange from description 
+        //-------------------------------------------------------------------------------------
+         SymDesc = Symdesc.Replace( "(" + SymExchange + ")", "" );
+         
+        //-------------------------------------------------------------------------------------
+         //  Add element with attributes to XML Document
+        //-------------------------------------------------------------------------------------
+        //print("inLoadGD");
+        If LoadGD then 
+        begin
+          If MR.Contains(SymRoot) = FALSE then 
+          begin
+            MR.ADD(SymRoot,InitMargin);
+          End 
+          else 
+          begin
+          If MR.Items[SymRoot] <> InitMargin then
+            MR.Items[SymRoot] = InitMargin;
+          end;
+        end;
+        
+        XE = XD.CreateElement( "SymbolRoot" );
+        XE.SetAttribute( "Root", SymRoot );
+        XE.SetAttribute( "Exch", SymExchange );
+        XE.SetAttribute( "Cur", SymCurrency );
+        XE.SetAttribute( "CurChar", SymCurrencyChar );
+        XE.SetAttribute( "InitMrgn", Numtostr( InitMargin, 0 ) ); 
+        XE.SetAttribute( "MaintMrgn", Numtostr( MaintenanceMargin, 0) );  
+        XE.SetAttribute( "DRPct", Numtostr( DayRatePercent, 0  ) );
+        XE.SetAttribute( "Desc", SymDesc );
+        XE.SetAttribute( "Updtd", DateTime.Now.Format(MDYHMSFormat) );
+        XNSymbolRoots.AppendChild( XE );
+        
+      //Print(XNSymbolRoots.Childnodes.Count);
+      end;
+    end; 
+  catch (Exception ex)
+    Print("GetMargin Error: ", ex.Message );  
+  end;
+end;
+
+method double GetBitcoinPercent(string text)
+variables:
+  int Ndx,
+  double Value;
+begin
+  Ndx = text.IndexOf("%");
+  if Ndx > 0 and double.TryParse(text.Substring(0, Ndx), Value) then
+  begin
+    return Value;
+  end
+  else
+  begin
+    return 0;
+  end;
+end;
+
+//-------------------------------------------------------------------------------------
+//  Check for UpperCase and Digits
+//-------------------------------------------------------------------------------------
+method string OnlyUCAndDigits(string input)
+variables:
+  int Ndx,
+  string NewString;
+begin
+  NewString = "";
+  for Ndx = 0 to input.Length - 1
+  begin
+    if UpperCaseAndDigits.IndexOf(input.Substring(Ndx, 1), 0, UpperCaseAndDigits.Length - 1) >= 0 then
+      NewString = NewString + input.Substring(Ndx, 1);
+  end;
+  return NewString;
+end;
+
+//-------------------------------------------------------------------------------------
+//  Determine currency from HTML
+//-------------------------------------------------------------------------------------
+method string GetSymCurrency( string stp )
+variables:
+  int Index,
+  string TestCurrency;
+begin
+  if stp.StartsWith("$") then return "USD";
+    
+  if stp.StartsWith("pound;")
+    or stp.StartsWith("£") then return "GBP";
+    
+  if stp.StartsWith("euro;")
+    or stp.StartsWith("€") then return "EUR";
+  
+  for Index = 0 to CurrencyListTL.Count - 1
+  begin
+    TestCurrency = CurrencyListTL.Item[Index] astype string;
+    if stp.StartsWith(TestCurrency) then return TestCurrency;
+  end;
+  
+  return "XXX";
+end;
+
+//-------------------------------------------------------------------------------------
+//  Determine currency character from HTML
+//-------------------------------------------------------------------------------------
+method string GetSymCurrencyChar( string stp )
+variables:
+  int Index,
+  string TestCurrency;
+begin
+  if stp.StartsWith("$") then return USDCurrency;
+    
+  if stp.StartsWith("pound;")
+    or stp.StartsWith("£") then return GBPCurrency;
+    
+  if stp.StartsWith("euro;")
+    or stp.StartsWith("€") then return EURCurrency; 
+    
+  if stp.StartsWith("CHF") then return CHFCurrency;
+  
+  for Index = 0 to CurrencyListTL.Count - 1
+  begin
+    TestCurrency = CurrencyListTL.Item[Index] astype string;
+    if stp.StartsWith(TestCurrency) then return TestCurrency;
+  end;
+  
+  return "XXX";
+end;
+
+//-------------------------------------------------------------------------------------
+//  Get the value without the currency
+//-------------------------------------------------------------------------------------
+method string GetValueWOCurrency( string stp )
+variables:
+  int Index,
+  string Work,
+  string TestCurrency;
+begin
+  if stp.Substring(0, 1) = "$" then return stp.Substring(1); 
+  
+  if stp.StartsWith("pound;") then return stp.Substring("pound;".Length - 1);
+  if stp.StartsWith("£") then return stp.Substring(1);  
+  
+  if stp.StartsWith("euro;") then return stp.Substring("euro;".Length - 1);
+  if stp.StartsWith("€") then return stp.Substring(1);  
+  
+  //-------------------------------------------------------------------------------------
+  //  Check for string representation of currecny
+  //-------------------------------------------------------------------------------------
+  for Index = 0 to CurrencyListTL.Count - 1
+  begin
+    TestCurrency = CurrencyListTL.Item[Index] astype string + " ";
+    if stp.StartsWith(TestCurrency) then return stp.Replace(TestCurrency, "").Trim();
+  end;
+  
+  return "0"; 
+end;
+
+#region - Remove Currency and commas from string -
+//-------------------------------------------------------------------------------------
+//  Removes Currency and commas
+//-------------------------------------------------------------------------------------
+method string Parsestring( string stp )
+variables:
+  string work, 
+  int x, 
+  string ts1, 
+  string ts2;
+begin
+  work = stp;
+  if work.StartsWith("$") or work.StartsWith("£") or work.StartsWith("€") then
+  work = rightstr( work, Strlen( work ) - 1 );
+  work = work.Replace(",", "");
+  return work;
+end;
+#endregion
+
+//-------------------------------------------------------------------------------------
+//  Removes Currency and commas
+//-------------------------------------------------------------------------------------
+method string Parsestringx( string stp )
+variables:
+  string work, 
+  int x, 
+  string ts1, 
+  string ts2;
+begin
+  work = stp;
+  if work.StartsWith("$") or work.StartsWith("£") or work.StartsWith("€") then
+  work = rightstr( work, Strlen( work ) - 1 );
+  work = work.Replace(",", "");
+  return work;
+end;
+ 
+//-------------------------------------------------------------------------------------
+//  Extract Exchange
+//-------------------------------------------------------------------------------------
+method string GetExchange( string work )
+begin
+  if instr( work, "(CME)" ) > 0 then return "CME";
+  if instr( work, "(CBOT)" ) > 0 then return "CBOT";
+  if instr( work, "(COMEX)" ) > 0 then return "COMEX";
+  if instr( work, "(ICE)" ) > 0 then return "ICE";
+  if instr( work, "(NYMEX)" ) > 0 then return "NYMEX";
+  if instr( work, "LIFFE" ) > 0 then return "LIFFE";    // Without ()
+  if instr( work, "EUREX" ) > 0 then return "EUREX";    // Without ()
+  if work = "INDEXES" then return "CME";
+  
+  //  Handle mislabeled items
+  if instr( work, "MINI DOW JONES") > 0
+    or instr( work, "Micro YM") > 0 then return "CBOT";
+  return "";
+end;
+#endregion
+
+#region - XML Document Methods -
+//-------------------------------------------------------------------------------------
+//  Create an XML Document and export it to a file emulating a serialized object
+//-------------------------------------------------------------------------------------
+method void CreateXmlDoc()
+begin
+  XD = XmlDocument.Create();
+  XD.AppendChild(XD.CreateElement( "FuturesMargin" ));
+  XNSymbolRoots = XD.CreateElement( "SymbolRoots" );
+  XD.DocumentElement.AppendChild( XNSymbolRoots );
+end;
+
+//-------------------------------------------------------------------------------------
+//  Load XMLDocument from a file in the MyWork directory if available
+//-------------------------------------------------------------------------------------
+method bool LoadXmlDoc()
+variables:
+  string FilePath,
+  XmlElement XEDE,
+  XmlElement XESymbolsRoot,
+  XmlElement XESymbol,
+  DateTime Updated;
+begin
+  FilePath = elsystem.Environment.GetMyWorkDirectory() + "/" + XmlDocName;
+  try
+    XD.Load(FilePath);
+    //-------------------------------------------------------------------------------------
+    //  Check that XML has a root element with corrct name
+    //-------------------------------------------------------------------------------------
+    XEDE = XD.DocumentElement;
+    if XEDE <> null and XEDE.Name = "FuturesMargin" and XEDE.ChildNodes.Count = 1 then 
+    begin
+      //-------------------------------------------------------------------------------------
+      //  Check that XML has a root element with corrct name
+      //-------------------------------------------------------------------------------------
+      XESymbolsRoot = XEDE.FirstChild astype XmlElement;
+      if XESymbolsRoot.Name = "SymbolsRoots" and XESymbolsRoot.ChildNodes.Count > 0 then
+      begin  
+//        if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} XML Loaded #Symbols={1}", 
+//          DateTime.Now, XESymbolsRoot.ChildNodes.Count));
+          
+        //-------------------------------------------------------------------------------------
+        //  Check age of file using Updtd value of first child
+        //-------------------------------------------------------------------------------------
+        XESymbol = XESymbolsRoot.FirstChild astype XmlElement;
+        if DateTime.TryParse(XESymbol.GetAttribute("Updtd"), Updated) then
+        begin
+          if (DateTime.Today - dateTime.Create(Updated.Year, Updated.Month, Updated.Day)).Days > iMaxDaysOld then return false;
+        end
+        else
+        begin
+          //-------------------------------------------------------------------------------------
+          //  Bad Updtd value
+          //-------------------------------------------------------------------------------------
+          return false;
+        end;
+        
+        return true;
+      end;
+    end;
+//    if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} XML Loaded Empty Doc", DateTime.Now)); 
+    return false;
+  catch (Exception ex)
+//    if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} XML Loaded No Doc", DateTime.Now)); 
+    return false;
+  end; 
+end;
+
+//-------------------------------------------------------------------------------------
+//  Write XMLDocument to a file in the MyWork directory
+//-------------------------------------------------------------------------------------
+method void WriteXmlDoc()
+variables:
+  string FilePath;
+begin
+  FilePath = elsystem.Environment.GetMyWorkDirectory() + "/" + XmlDocName;
+  XD.Save(FilePath); 
+end;
+#endregion
+
+#region - Timer Methods -
+method void CreateTimer()
+begin
+  //-------------------------------------------------------------------------------------
+  //  Create OneSecond timer
+  //-------------------------------------------------------------------------------------
+  tmrOneSecond.Interval = 1000;
+  tmrOneSecond.AutoReset = true;
+  tmrOneSecond.Elapsed += tmrOneSecond_Elapsed;
+  tmrOneSecond.Enable = FALSE;
+end;
+
+method void tmrOneSecond_Elapsed( elsystem.Object sender, TimerElapsedEventArgs args )
+begin
+
+  UpdateChains();
+  
+  If oInitialMargin = 0 then begin
+    GetMarginXML();
+    TestCount += 1;
+    If TestCount > 10 then 
+      tmrOneSecond.enable = FALSE;
+  end Else if tmrOneSecond.Interval <> 15000 then begin
+    GetMarginXML();
+    tmrOneSecond.Interval = 15000;
+  end;
+  
+  Session.BackColor = color.Darkgray;
+
+  If SessionStartTime(1,1) < SessionEndTime(1,1) then begin
+    
+  If DateTime.Now.ELTime >= SessionStartTime(1,1) AND DateTime.Now.ELTime < CalcTime(SessionEndTime(1,1),-20) then
+    Session.BackColor = color.Darkgreen;
+  
+  If DateTime.Now.ELTime >= CalcTime(SessionEndTime(1,1), -20) AND DateTime.Now.ELTime < SessionEndTime(1,1) then
+    Session.BackColor = color.DeepPink;
+  
+  If DateTime.Now.ELTime >= CalcTime(SessionEndTime(1,1),-5) AND DateTime.Now.ELTime <= CalcTime(SessionEndTime(1,1),1) then
+    Session.BackColor = color.DarkRed;
+    
+  end else begin
+  
+  If DateTime.Now.ELTime >= SessionStartTime(1,1) AND DateTime.Now.ELTime <= 2359 then
+    Session.BackColor = color.Darkgreen;
+  
+  If DateTime.Now.ELTime >= 0 AND DateTime.Now.ELTime <= CalcTime(SessionEndTime(1,1),-20) then
+    Session.BackColor = color.Darkgreen;
+  
+  If DateTime.Now.ELTime >= CalcTime(SessionEndTime(1,1), -20) AND DateTime.Now.ELTime < SessionEndTime(1,1) then 
+    Session.BackColor = color.DeepPink;
+  
+  If DateTime.Now.ELTime >= CalcTime(SessionEndTime(1,1),-5) AND DateTime.Now.ELTime <= CalcTime(SessionEndTime(1,1),1) then
+    Session.BackColor = color.DarkRed;
+    
+  end;  
+end;
+#endregion
+
+#region - Extract Margin Information from XmlDocument -
+Method bool GetMarginXML()  
+variables:
+  string FilePath,
+  XmlDocument XD,
+  XmlElement XEX,
+  XmlNodeList XNL,
+  int Index;
+begin
+  Try
+    //-------------------------------------------------------------------------------------
+    //  Determine the root for the futures contracts
+    //-------------------------------------------------------------------------------------
+  
+    if SymbolType = SecurityType.Future then 
+    begin
+  
+      //-------------------------------------------------------------------------------------
+      //  Read the XML document containing the information extracted from the web site
+      //-------------------------------------------------------------------------------------
+      FilePath = elsystem.Environment.GetMyWorkDirectory() + "/FuturesMarginTA.xml" ;
+      XD = XmlDocument.Create() ;
+      XD.Load( FilePath ) ;
+      
+      XNL = XD.GetElementsByTagName( "SymbolRoot" ) ;
+      
+      //-------------------------------------------------------------------------------------
+      //  Loop through the XML to find the appropriate futures root and return the info
+      //-------------------------------------------------------------------------------------
+      for Index = 0 to XNL.Count - 1
+      begin
+        XEX = XNL.Item( Index ) astype XmlElement ;
+        if XEX.GetAttribute( "Root" ) = ThisSymbolRoot then
+        begin
+          ThisSymbolRoot = XEX.GetAttribute( "Root" ) ;
+          oSymbolDesc = XEX.GetAttribute( "Desc" ) ;
+          oSymbolExch = XEX.GetAttribute( "Exch" ) ;
+          oSymbolCurrency = XEX.GetAttribute( "Cur" ) ;
+          if XEX.Attributes.Contains("CurChar") then
+          begin
+            oSymbolCurrencyChar = XEX.GetAttribute("CurChar");
+            //Print("oSymbolCurrencyChar=", oSymbolCurrencyChar);
+          end
+          else
+          begin
+            //Print("oSymbolCurrency=", oSymbolCurrency);
+            switch oSymbolCurrency
+            begin
+              case "USD":
+                oSymbolCurrencyChar = USDCurrency;
+              case "EUR":
+                oSymbolCurrencyChar = EURCurrency;
+              case "GBP":
+                oSymbolCurrencyChar = GBPCurrency;
+              case "CHF":
+                oSymbolCurrencyChar = CHFCurrency;
+              default:
+                oSymbolCurrencychar = oSymbolCurrency;
+            end;
+          end;
+          
+          oInitialMargin = strtonum( XEX.GetAttribute( "InitMrgn" ) ) ;
+          oMaintenanceMargin = strtonum( XEX.GetAttribute( "MaintMrgn" ) ) ; 
+          oDayRatePercent = strtonum( XEX.GetAttribute( "DRPct" ) ) ;
+          oUpdated = XEX.GetAttribute( "Updtd" ) ;
+          
+          //-------------------------------------------------------------------------------------
+          //  If data is out-of-date, re-initiate getting data from web page
+          //-------------------------------------------------------------------------------------
+          If stringtodate(oUpdated) > 0 AND stringtodate(oUpdated) < DatetoJulian(DateTime.Today.ELDate) then begin
+            GetWeb();
+          end;
+          break ;
+        end ;
+      end ; 
+    end ;
+    SetMargin();
+    SetPointValues();      //  Needed here for currency character
+    Return ( ThisSymbolRoot <> "" ) ;
+  
+  catch (Exception ex)
+    //Print( "GetFuturesMargin: Symbol=", Symbol, " Error=", ex.Message ) ;
+    Return false ;
+  end ;
+end;
+#endregion
+
+#region - Update Futures Chain Information -
+Method void UpdateChains()
+variables: 
+  quotesprovider TempQP, 
+  int POI, 
+   double CurrLast, 
+   int PrevVol,  
+   int CurVol, 
+   double CurrPctCh, 
+   Int CurrOI;
+Begin
+  If QPS.Count > 0 AND BSymbols.Count > 0 then 
+  begin
+    //-------------------------------------------------------------------------------------
+    //  Put Futures Symbols into Controls
+    //-------------------------------------------------------------------------------------
+    Sym1.Text = BSymbols[0].ToString();
+    If Bsymbols.Count > 1 then
+      Sym2.Text = BSymbols[1].ToString();
+    If Bsymbols.Count > 2 then
+      Sym3.Text = BSymbols[2].ToString();
+    If Bsymbols.Count > 3 then
+      Sym4.Text = BSymbols[3].ToString();
+  
+    
+    TempQP = QPS[0] astype QuotesProvider;
+    CurrLast = TempQP.Quote["Last"].doublevalue;
+    PrevVol = TempQP.Quote["PreviousVolume"].integervalue;
+    CurVol = TempQP.Quote["DailyVolume"].integervalue;
+    POI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+    If TempQP.Quote["PreviousClose"].doublevalue > 0 then
+      CurrPctCh = (TempQP.Quote["Last"].doublevalue - TempQP.Quote["PreviousClose"].doublevalue) / TempQP.Quote["PreviousClose"].doublevalue;
+    Last1.Text = string.Format("{0:N#}".Replace("#", NumToStr(DecimalPlacesX, 0)), CurrLast);
+    Vol1.Text = string.Format("{0:N0}", PrevVol);
+    CVol1.Text = string.Format("{0:N0}", CurVol);
+    PctCh1.Text = string.Format("{0:P2}", CurrPctCh);
+    OI1.Text = string.Format("{0:N0}", POI);
+    
+    If CurrPctCh <= 0 then 
+    begin
+      PctCh1.BackColor = Color.DarkRED;
+      Last1.BackColor = Color.DarkRED;
+    end 
+    else 
+    begin
+      PctCh1.BackColor = Color.Darkgreen;
+      Last1.BackColor = Color.Darkgreen;
+    end;
+    
+    If QPS.Count > 1 then 
+    begin
+      TempQP = QPS[1] astype quotesprovider;
+      CurrLast = TempQP.Quote["Last"].doublevalue;
+      PrevVol = TempQP.Quote["PreviousVolume"].integervalue;
+      CurVol = TempQP.Quote["DailyVolume"].integervalue;
+      POI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      If TempQP.Quote["PreviousClose"].doublevalue > 0 then
+        CurrPctCh = (TempQP.Quote["Last"].doublevalue - TempQP.Quote["PreviousClose"].doublevalue) / TempQP.Quote["PreviousClose"].doublevalue;
+      Last2.Text = string.Format("{0:N#}".Replace("#", NumToStr(DecimalPlacesX, 0)), CurrLast);
+      Vol2.Text = string.Format("{0:N0}", PrevVol);
+      CVol2.Text = string.Format("{0:N0}", CurVol);
+      PctCh2.Text = string.Format("{0:P2}", CurrPctCh);
+      OI2.Text = string.Format("{0:N0}", POI);
+      If CurrPctCh <= 0 then 
+      begin
+        PctCh2.BackColor = Color.DarkRED;
+        Last2.BackColor = Color.DarkRED;
+      end 
+      else 
+      begin
+        PctCh2.BackColor = Color.Darkgreen;
+        Last2.BackColor = Color.Darkgreen;
+      end;
+    end;
+    
+    If QPS.Count > 2 then 
+    begin
+      TempQP = QPS[2] astype quotesprovider;
+      CurrLast = TempQP.Quote["Last"].doublevalue;
+      PrevVol = TempQP.Quote["PreviousVolume"].integervalue;
+      CurVol = TempQP.Quote["DailyVolume"].integervalue;
+      POI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      If TempQP.Quote["PreviousClose"].doublevalue > 0 then
+        CurrPctCh = (TempQP.Quote["Last"].doublevalue - TempQP.Quote["PreviousClose"].doublevalue) / TempQP.Quote["PreviousClose"].doublevalue;
+      Last3.Text = string.Format("{0:N#}".Replace("#", NumToStr(DecimalPlacesX, 0)), CurrLast);
+      Vol3.Text = string.Format("{0:N0}", PrevVol);
+      CVol3.Text = string.Format("{0:N0}", CurVol);
+      PctCh3.Text = string.Format("{0:P2}", CurrPctCh);
+      OI3.Text = string.Format("{0:N0}", POI);
+      If CurrPctCh <= 0 then 
+      begin
+        PctCh3.BackColor = Color.DarkRED;
+        Last3.BackColor = Color.DarkRED;
+      end 
+      else 
+      begin
+        PctCh3.BackColor = Color.Darkgreen;
+        Last3.BackColor = Color.Darkgreen;
+      end;
+    end;
+    
+    If QPS.Count > 3 then 
+    begin
+      TempQP = QPS[3] astype quotesprovider;
+      CurrLast = TempQP.Quote["Last"].doublevalue;
+      PrevVol = TempQP.Quote["PreviousVolume"].integervalue;
+      CurVol = TempQP.Quote["DailyVolume"].integervalue;
+      POI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      If TempQP.Quote["PreviousClose"].doublevalue > 0 then
+        CurrPctCh = (TempQP.Quote["Last"].doublevalue - TempQP.Quote["PreviousClose"].doublevalue) / TempQP.Quote["PreviousClose"].doublevalue;
+      Last4.Text = string.Format("{0:N#}".Replace("#", NumToStr(DecimalPlacesX, 0)), CurrLast);
+      Vol4.Text = string.Format("{0:N0}", PrevVol);
+      CVol4.Text = string.Format("{0:N0}", CurVol);
+      PctCh4.Text = string.Format("{0:P2}", CurrPctCh);
+      OI4.Text = string.Format("{0:N0}", POI);
+      If CurrPctCh <= 0 then 
+      begin
+        PctCh4.BackColor = Color.DarkRED;
+        Last4.BackColor = Color.DarkRED;
+      end 
+      else 
+      begin
+        PctCh4.BackColor = Color.Darkgreen;
+        Last4.BackColor = Color.Darkgreen;
+      end;
+    end;
+  end;
+end;
+#endregion
+
+#region - BuildQPS -
+method void BuildQPS()
+vars: 
+  int x, 
+  int CountMax, 
+  int CurSymNum, 
+  int CurFrontNum, 
+  string tSym, 
+  tokenlist TempMon, 
+  datetime tempLTD, 
+  datetime tempFND, 
+  quotesprovider QP, 
+  double tempDate ;
+begin
+  //-------------------------------------------------------------------------------------
+  //  
+  //-------------------------------------------------------------------------------------
+  tempDate = LTD;
+  If tempDate > 1100000 AND tempDate < 1300000 then begin
+    tempLTD = DateTime.FromELDateAndTime(tempDate, SessionEndTime(1,1));
+    ChartLD.Text = "Chart(LTD): " + Symbol + " = " + tempLTD.ELFormatDate("ddd dd MMM yy");
+  end else
+    ChartLD.Text = "Chart(LTD): " + "n/a";
+
+  TempDate = FND;
+  If TempDate > 1100000 AND TempDate < 1300000 then begin  
+    tempFND = DateTime.FromELDateAndTime(TempDate, SessionEndTime(1,1));
+        ChartFN.Text = "Chart(FND): " + Symbol + " = " + tempFND.ELFormatDate("ddd dd MMM yy");
+  end else
+    ChartFN.Text = "Chart(FND): " + "n/a";
+
+  TempMon = FMonths;
+  CountMax = TempMon.Count;
+
+  //-------------------------------------------------------------------------------------
+  //  Determine symbols to be used for up to 4 futures contracts
+  //-------------------------------------------------------------------------------------
+  BSymbols.clear();
+  
+  //-------------------------------------------------------------------------------------
+  //  For current year
+  //-------------------------------------------------------------------------------------
+  For x = 0 to CountMax -1 
+  begin
+    tSym = ThisSymbolRoot + TempMon.Item[x] + NumtoStr(YY,0);
+    If CheckSymbol( tSym ) then 
+    begin
+      BSymbols.push_back(tSym);
+    end;    
+  end;
+  
+  //-------------------------------------------------------------------------------------
+  //  For next year
+  //-------------------------------------------------------------------------------------
+  For x = 0 to CountMax -1 
+  begin
+    tSym = ThisSymbolRoot + TempMon.Item[x] + NumtoStr(YY+1,0);
+    If CheckSymbol( tSym ) then 
+    begin
+      BSymbols.push_back(tSym);
+    end;
+  end;
+
+  //-------------------------------------------------------------------------------------
+  //  Create QuotesProviders for each symbol and request loading
+  //-------------------------------------------------------------------------------------
+  For x = 0 to BSymbols.Count -1 begin
+    QP = new quotesprovider ;
+    QP.Fields += "Last, PreviousClose, LastTradingDate, PreviousOpenInterest, FirstNoticeDate, PreviousVolume, DailyVolume";
+    QP.Realtime = TRUE;
+    QP.TimeZone = tsdata.common.TimeZone.local;
+    QP.Name = "QP";
+    QP.Symbol = BSymbols[x].ToString();
+    QP.Load = TRUE;
+    QPS.push_back(QP astype quotesprovider);
+  end;
+end;
+#endregion
+
+#region - Build Symbols -
+method void BuildSymbols()
+variables: 
+  int x, 
+  int CountMax, 
+  int CurSymNum, 
+  int AdjustX, 
+  quotesprovider TempQP, 
+   vector TempSym, 
+   vector TempQP2, 
+   int CurrOI, 
+   int NextOI, 
+   int CurrVol, 
+   int NextVol;
+begin
+  CountMax = BSymbols.Count - 1;
+  TempQP2 = QPS.Clone() astype vector;
+  TempSym = BSymbols.Clone() astype vector;
+  AdjustX = 0;
+
+  For x = 0 to CountMax 
+  begin
+    TempQP = TempQP2[x] astype quotesprovider;
+    If  (TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 OR TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000) AND  
+        MaxList(TempQP.Quote["FirstNoticeDate"].datevalue.ELDate , TempQP.Quote["LastTradingDate"].datevalue.ELDate) < DateTime.Today.ELDate then begin
+      BSymbols.erase(x - AdjustX);
+      QPS.erase(x - AdjustX); 
+      AdjustX += 1;
+    end;
+  end;
+  
+  if QPS.Count > 0 then 
+  begin
+  
+    TempQP = QPS[0] astype quotesprovider;
+    CurrOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+    CurrVol = TempQP.Quote["PreviousVolume"].integervalue;
+    If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 then 
+    begin
+      CurrentSymLTD = TempQP.Quote["LastTradingDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+      CurrentLTD.Text = "Cur(LTD): " + BSymbols[0] astype string + " = " + CurrentSymLTD;
+    end else
+      CurrentLTD.Text = "Cur(LTD): " + "n/a";
+    If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 then 
+    begin  
+      CurrentSymFND = TempQP.Quote["FirstNoticeDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+      CurrentFND.Text = "Cur(FND): " + BSymbols[0] astype string + " = " + CurrentSymFND;
+    end else
+      CurrentFND.Text = "Cur(FND): " + "n/a";
+      
+    If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate <= TempQP.Quote["LastTradingDate"].datevalue.ELDate AND TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 then begin
+      CurrentFND.Text = "*!* " + CurrentFND.Text;
+    
+      If   TempQP.Quote["FirstNoticeDate"].datevalue.ELDate <= Datetime.Today.ELDate then
+          CurrentLTD.Text = "*!* " + CurrentLTD.Text;
+           
+    end else If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > TempQP.Quote["LastTradingDate"].datevalue.ELDate OR TempQP.Quote["FirstNoticeDate"].datevalue.ELDate < 1100000 then
+      CurrentLTD.Text = "*!* " + CurrentLTD.Text;
+    FrontSymLTD = CurrentSymLTD;
+    FrontLTD.Text = "Front (LTD): " + BSymbols[0] astype string + " = " + FrontSymLTD;
+  
+    FrontSymFND = CurrentSymFND;
+    FrontFND.Text = "Front (FND): " + BSymbols[0] astype string + " = " + FrontSymFND;
+  
+    If QPS.Count > 1 then 
+    begin
+      TempQP = QPS[1] astype quotesprovider;
+      NextOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      NextVol = TempQP.Quote["PreviousVolume"].integervalue;
+    
+      If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1  then 
+      begin
+        NextSymLTD = TempQP.Quote["LastTradingDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString(); 
+        NextLTD.Text = "Next (LTD): " + BSymbols[1] astype string + " = " + NextSymLTD;
+      end else
+        NextLTD.Text = "Next (LTD): " + "n/a";
+      If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1  then 
+      begin  
+        NextSymFND = TempQP.Quote["FirstNoticeDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+        NextFND.Text = "Next (FND): " + BSymbols[1] astype string + " = " + NextSymFND; 
+      end else
+        NextFND.Text = "Next (FND): " + "n/a";
+    end;
+    if CurrOI < NextOI AND CurrVol < NextVol AND QPS.Count > 1 then 
+    begin
+      TempQP = QPS[1] astype quotesprovider;
+      CurrOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      CurrVol = TempQP.Quote["PreviousVolume"].integervalue;
+      If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1 then 
+      begin
+        FrontSymLTD = NextSymLTD;
+        FrontLTD.Text = "Front (LTD): " + BSymbols[1] astype string + " = " + NextSymLTD;
+      end else
+        FrontLTD.Text = "Front (LTD): " + "n/a";
+      If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1 then 
+      begin  
+        FrontSymFND = NextSymFND;
+        FrontFND.Text = "Front (FND): " + BSymbols[1] astype string + " = " + NextSymFND;
+      end else
+        FrontFND.Text = "Front (FND): " + "n/a";
+  
+      if QPS.Count > 2 then 
+      begin
+        TempQP = QPS[2] astype quotesprovider;
+        NextOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+        NextVol = TempQP.Quote["PreviousVolume"].integervalue;
+        If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 2 then 
+        begin
+          NextSymLTD = TempQP.Quote["LastTradingDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString(); 
+          NextLTD.Text = "Next (LTD): " + BSymbols[2] astype string + " = " + NextSymLTD;
+        end else
+          NextLTD.Text = "Next (LTD): " + "n/a";
+        If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 2 then 
+        begin  
+          NextSymFND = TempQP.Quote["FirstNoticeDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+          NextFND.Text = "Next (FND): " + BSymbols[2] astype string + " = " + NextSymFND;
+        end else
+          NextFND.Text = "Next (FND): " + "n/a";
+      end;
+    end;
+    
+    if CurrOI < NextOI AND CurrVol < NextVol AND QPS.Count > 2 then 
+    begin
+      TempQP = QPS[2] astype quotesprovider;
+      CurrOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      CurrVol = TempQP.Quote["PreviousVolume"].integervalue;
+      If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1  then 
+      begin
+        FrontSymLTD = NextSymLTD;
+        FrontLTD.Text = "Front (LTD): " + BSymbols[1] astype string + " = " + NextSymLTD;
+      end else
+        FrontLTD.Text = "Front (LTD): " + "n/a";
+      If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1 then 
+      begin  
+        FrontSymFND = NextSymFND;
+        FrontFND.Text = "Front (FND): " + BSymbols[1] astype string + " = " + NextSymFND;
+      end else
+        FrontFND.Text = "Front (FND): " + "n/a";
+      if QPS.Count > 3 then 
+      begin
+        TempQP = QPS[3] astype quotesprovider;
+        NextOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+        NextVol = TempQP.Quote["PreviousVolume"].integervalue;
+        If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 3 then 
+        begin
+          NextSymLTD = TempQP.Quote["LastTradingDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString(); 
+          NextLTD.Text = "Next (LTD): " + BSymbols[3] astype string + " = " + NextSymLTD;
+        end else
+          NextLTD.Text = "Next (LTD): " + "n/a";
+        If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 3 then 
+        begin  
+          NextSymFND = TempQP.Quote["FirstNoticeDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+          NextFND.Text = "Next (FND): " + BSymbols[3] astype string + " = " + NextSymFND;
+        end else
+          NextFND.Text = "Next (FND): " + "n/a";
+      end;  
+    end;
+    
+    if CurrOI < NextOI AND CurrVol < NextVol AND QPS.Count > 3 then 
+    begin
+      TempQP = QPS[3] astype quotesprovider;
+      CurrOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+      CurrVol = TempQP.Quote["PreviousVolume"].integervalue;
+      If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1  then 
+      begin
+        FrontSymLTD = NextSymLTD;
+        FrontLTD.Text = "Front (LTD): " + BSymbols[1] astype string + " = " + NextSymLTD;
+      end else
+        FrontLTD.Text = "Front (LTD): " + "n/a";
+      If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 1  then 
+      begin  
+        FrontSymFND = NextSymFND;
+        FrontFND.Text = "Front (FND): " + BSymbols[1] astype string + " = " + NextSymFND;
+      end else
+        FrontFND.Text = "Front (FND): " + "n/a";
+      
+      if QPS.Count > 4 then 
+      begin  
+        TempQP = QPS[4] astype quotesprovider; 
+        NextOI = TempQP.Quote["PreviousOpenInterest"].integervalue;
+        NextVol = TempQP.Quote["PreviousVolume"].integervalue;
+        If TempQP.Quote["LastTradingDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 4 then 
+        begin
+          NextSymLTD = TempQP.Quote["LastTradingDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString(); 
+          NextLTD.Text = "Next (LTD): " + BSymbols[4] astype string + " = " + NextSymLTD;
+        end else
+          NextLTD.Text = "Next (LTD): " + "n/a";
+          
+        If TempQP.Quote["FirstNoticeDate"].datevalue.ELDate > 1100000 AND Bsymbols.Count > 4 then 
+        begin  
+          NextSymFND = TempQP.Quote["FirstNoticeDate"].datevalue.ELFormatDate("ddd dd MMM yy").ToString();
+          NextFND.Text = "Next (FND): " + BSymbols[4] astype string + " = " + NextSymFND;
+        end 
+        else
+          NextFND.Text = "Next (FND): " + "n/a";
+      end;
+    end;
+  end;  
+end; //CurSymNum > 0 AND GoodSymbols >= 3  ;
+#endregion
+
+#region - Set Session -
+Method void SetSessions()
+variables: 
+  datetime tempST, 
+  datetime tempET;
+Begin
+  tempST = DateTime.FromELDateAndTime(date, SessionStartTime(1,1));
+  tempET = DateTime.FromELDateAndTime(date, SessionEndTime(1,1));
+  
+  If AnalysisTechnique.DataStreams[0].TimeZone = 0 then
+  begin
+    Session.Text = "LocSess: " + tempST.ELFormatTime( "hh:mm tt" ) + " to " + tempET.ELFormatTime( "hh:mm tt" );
+  end
+  else
+  begin
+    Session.Text = "ExchSess: " + tempST.ELFormatTime( "hh:mm tt" ) + " to " + tempET.ELFormatTime( "hh:mm tt" );
+  end;
+  
+end;
+#endregion
+
+#region - Set Month Codes -
+method void SetMonthCodes()
+vars: string tempstr;
+begin
+  FutureMonths(ThisSymbolRoot);
+  tempstr = FMonths.ToString();
+  MonthCodes.Text = "Contract Month Codes: " + tempstr;
+end;
+
+Method int MonthNum(string sMonth) 
+vars: int FMonthNum;
+begin
+    switch(sMonth)
+    Begin
+      case "F": FMonthNum = 1;
+      case "G": FMonthNum = 2;
+      case "H": FMonthNum = 3;
+      case "J": FMonthNum = 4;
+      case "K": FMonthNum = 5;
+      case "M": FMonthNum = 6;
+      case "N": FMonthNum = 7;
+      case "Q": FMonthNum = 8;
+      case "U": FMonthNum = 9;
+      case "V": FMonthNum = 10;
+      case "X": FMonthNum = 11;
+      case "Z": FMonthNum = 12;
+      Default: FMonthNum = 0;
+    end;  
+  Return FMonthNum;
+end;
+
+Method void FutureMonths(string FRoot)
+begin
+  If FMonths.Count > 0 then
+    FMonths.Clear();
+  switch(FRoot)
+  Begin
+
+    case "ES": FMonths += "H,M,U,Z";
+    case "YM": FMonths += "H,M,U,Z";
+    case "TF": FMonths += "H,M,U,Z";
+    case "NQ": FMonths += "H,M,U,Z";
+    case "RTY": FMonths += "H,M,U,Z";
+    case "EMD": FMonths += "H,M,U,Z";
+    
+    case "MES": FMonths += "H,M,U,Z";
+    case "MYM": FMonths += "H,M,U,Z";
+    case "M2K": FMonths += "H,M,U,Z";
+    case "MNQ": FMonths += "H,M,U,Z";
+    
+    case "FESX": FMonths += "H,M,U,Z";
+    case "FDXM": FMonths += "H,M,U,Z";
+    case "FDAX": FMonths += "H,M,U,Z";
+    case "FGBL": FMonths += "H,M,U,Z";
+    case "FGBM": FMonths += "H,M,U,Z";
+    
+    Case "FSTB": FMonths += "H,M,U,Z";
+    Case "FSTG": FMonths += "H,M,U,Z";
+    Case "FGBS": FMonths += "H,M,U,Z";
+    Case "FOAT": FMonths += "H,M,U,Z";
+    Case "FGBX": FMonths += "H,M,U,Z";
+    Case "FSTU": FMonths += "H,M,U,Z";
+    Case "LZ": FMonths += "H,M,U,Z";
+    Case "LT2": FMonths += "H,M,U,Z";
+    Case "LL": FMonths += "H,M,U,Z";
+    Case "LF2": FMonths += "H,M,U,Z";
+    Case "LJ": FMonths += "H,M,U,Z";
+    Case "G": FMonths += "H,M,U,Z";
+    Case "H": FMonths += "H,M,U,Z";
+    Case "CC3": FMonths += "H,K,N,U,Z";
+    Case "RC": FMonths += "H,K,N,U,Z";
+    
+    case "NK": FMonths += "H,M,U,Z";
+    case "JY": FMonths += "H,M,U,Z";
+    case "SF": FMonths += "H,M,U,Z";
+    case "EC": FMonths += "H,M,U,Z";
+    case "DX": FMonths += "H,M,U,Z";
+    case "CD": FMonths += "H,M,U,Z";
+    case "BP": FMonths += "H,M,U,Z";
+    case "AD": FMonths += "H,M,U,Z";
+    case "MP1": FMonths += "H,M,U,Z";
+    
+    Case "NE1": FMonths += "H,M,U,Z";
+    Case "M6A": FMonths += "H,M,U,Z";
+    Case "M6B": FMonths += "H,M,U,Z";
+    Case "M6C": FMonths += "H,M,U,Z";
+    Case "E7": FMonths += "H,M,U,Z";
+    Case "J7": FMonths += "H,M,U,Z";
+    
+    case "US": FMonths += "H,M,U,Z";
+    case "TY": FMonths += "H,M,U,Z";
+    case "TU": FMonths += "H,M,U,Z";
+    case "FV": FMonths += "H,M,U,Z";
+    
+    case "ED": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    
+    case "XBT": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "BTC": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+  
+    case "HG": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "GC": FMonths += "G,J,M,Q,V,Z";
+    case "SI": FMonths += "F,H,K,N,U,Z";
+    case "YG": FMonths += "G,J,M,Q,V,Z";
+    case "YI": FMonths += "G,J,M,Q,V,Z";
+    case "PL": FMonths += "F,J,N,V";
+    case "PA": FMonths += "H,M,U,Z";
+    
+    Case "MGC": FMonths += "G,J,M,Q,V,Z";;
+    
+    case "CL": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "HO": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "NG": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "RB": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    case "QM": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    
+    Case "QN": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";;
+    Case "QH": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    Case "QU": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+        
+    case "W":  FMonths += "H,K,N,U,Z";
+    case "SM": FMonths += "F,H,K,N,Q,U,V,Z";
+    case "S":  FMonths += "F,H,K,N,Q,U,X";
+    case "RR": FMonths += "F,H,K,N,U,X";
+    case "O":  FMonths += "F,H,K,N,U,Z";
+    case "C":  FMonths += "H,K,N,U,Z";
+    case "BO": FMonths += "F,H,K,N,Q,U,V,Z";
+    
+    case "LH": FMonths += "G,J,M,N,Q,V,Z";
+    case "LC": FMonths += "G,J,M,Q,V,Z";
+    case "FC": FMonths += "F,H,J,K,Q,U,V,X";
+    case "SB": FMonths += "H,K,N,V";
+
+    case "KC": FMonths += "H,K,N,U,Z";
+    case "CT": FMonths += "H,K,N,V,Z";
+    case "CC": FMonths += "H,K,N,U,Z";
+    case "OJ": FMonths += "F,H,K,N,U,X";
+  
+    case "LB": FMonths += "F,H,K,N,U,X";
+    
+    Case "KW": FMonths += "H,K,N,U,Z";
+    Case "DA": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    
+    Case "CB": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    Case "YW": FMonths += "H,K,N,U,Z";    
+    Case "YC": FMonths += "H,K,N,U,Z";
+
+    Case "YK": FMonths += "H,K,N,U,Z";
+  
+    case "VX": FMonths += "F,G,H,J,K,M,N,Q,U,V,X,Z";
+    
+    Default: FMonths += "invalidRoot"; 
+  end;
+
+end;
+#endregion
+
+If LastBar = FALSE AND LastbaronchartEx then 
+begin
+//  if iLogSteps then Print(string.Format("{0:MM/dd/yy HH:mm:ss} Last Bar", DateTime.Now));
+  LastBar = true;
+  tmrOneSecond.Enable = true;
+  If SymbolOK AND SymbolType = Category then begin
+    BuildSymbols(); 
+    GetMarginFromWeb();
+    ShowForm();  
+  end
+  else
+  begin
+//     Print(string.Format("{0:MM/dd/yy HH:mm:ss} Symbol Not OK", DateTime.Now));
+  end;  
+end 
+else if BarStatus(1) = 2 then 
+begin
+  BarValue = Round(Avgtruerange(30) * BigPointValue * ConCalc.Value,0);
+  BarVal.Text = string.Format("Avg Bar Value: {0:C0}", BarValue).Replace("$", oSymbolCurrencyChar); 
+end;
+
+//-------------------------------------------------------------------------------------
+//  End Of Code
+//-------------------------------------------------------------------------------------
